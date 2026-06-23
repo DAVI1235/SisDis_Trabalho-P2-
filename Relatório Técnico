@@ -1,0 +1,87 @@
+Relatório Técnico
+Exclusão Mútua Centralizada em Sistemas Distribuídos
+Autores: Isabelle da Rocha Dias, Lucas Rosa, Davi Luiz
+Contexto: Avaliação Prática (P2) de Sistemas Distribuídos
+1. Introdução
+O presente documento detalha o projeto, as decisões arquiteturais e a implementação de um ecossistema de software voltado à resolução do problema de exclusão mútua em sistemas distribuídos por meio de uma abordagem centralizada. O escopo primordial do trabalho consiste em gerenciar de maneira coordenada e determinística a concorrência estabelecida entre diversos processos independentes que buscam, de forma simultânea, acessar uma região crítica compartilhada. Para a validação do modelo proposto, as funcionalidades especificadas foram integralmente codificadas e submetidas a estudos de caso rigorosos voltados à avaliação estrutural e de consistência temporal. A solução foi idealizada e construída em conformidade com as diretrizes e requisitos acadêmicos estipulados para o projeto.
+2. Decisões de Projeto e Arquitetura
+A arquitetura adotada para solucionar o problema apoia-se no modelo clássico cliente-servidor centralizado, estrutura na qual um nó coordenador global detém a responsabilidade exclusiva de arbitrar, ordenar e conceder as permissões de acesso aos múltiplos nós distribuídos que compõem a malha de clientes executores.
+Para gerenciar de forma previsível as interações na rede, o sistema estabelece um protocolo de aplicação estrito composto por três tipos principais de mensagens baseadas em requisições e concessões funcionais. A primeira delas é a mensagem de requisição, denominada REQUEST (identificada pelo tipo 1), a qual é emitida por qualquer processo disputante que almeje ingressar na região crítica. Em resposta, o coordenador despacha de forma exclusiva a mensagem de concessão, denominada GRANT (tipo 2), autorizando formalmente a entrada do nó solicitante na zona protegida. Por fim, ao concluir suas operações regulamentares, o processo cliente remete uma mensagem de liberação, denominada RELEASE (tipo 3), sinalizando de forma definitiva a desocupação do recurso compartilhado. Em conformidade com as restrições de projeto, todas as mensagens adotam rigidamente um padrão de strings com tamanho fixo estabelecido em 10 bytes, utilizando o caractere pipe (|) como separador oficial para delimitar os campos internos do identificador da mensagem e do processo. O espaço remanescente no buffer de transmissão é sistematicamente preenchido com zeros à direita, garantindo a padronização das mensagens e a integridade do parsing de rede.
+A concepção interna do processo coordenador fundamenta-se em um paradigma multi-threaded, uma abordagem que visa segregar com eficiência as atribuições de recepção de rede, processamento lógico do algoritmo e interface de controle com o usuário. Uma thread paralela dedica-se exclusivamente ao escopo de aceitar novas conexões oriundas dos processos clientes, registrá-las e delegar a leitura de seus fluxos de dados a threads operárias dedicadas. O ordenamento dos pedidos de acesso concorrentes é gerenciado por meio de uma estrutura clássica de dados em fila, a qual armazena de forma fidedigna a sequência cronológica de solicitações. Simultaneamente, os registros de todas as transações de rede — contemplando o sentido da transmissão, o tipo de mensagem, os identificadores envolvidos e marcações temporais com precisão de milissegundos — são exportados continuamente para um arquivo de log persistente. A camada de comunicação subjacente apoia-se no protocolo orientado a conexão TCP por meio da API nativa de sockets do sistema operacional, permitindo ao coordenador gerenciar um mapeamento dinâmico de descritores de rede individuais para cada cliente ativo. Adicionalmente, uma thread de interface expõe um terminal síncrono projetado para monitorar o estado do sistema em tempo real, fornecendo comandos para inspecionar a fila corrente, listar métricas de atendimentos acumulado ou finalizar o servidor de maneira coordenada. Para mitigar condições de corrida decorrentes desse paralelismo, o acesso concorrente às estruturas de dados globais é blindado por primitivas rigorosas de sincronização baseadas em travas de exclusão mútua locais.
+Por outro lado, a arquitetura dos processos clientes opera de forma autônoma, cíclica e puramente reativa. A etapa de inicialização requer que cada nó estabeleça uma conexão TCP direta com o coordenador, utilizando para isso um socket parametrizado com o endereço de rede e a porta de escuta do servidor. Uma vez estabelecido o enlace, o cliente inicia um laço repetitivo composto por sucessivas tentativas de obter acesso exclusivo à região crítica. Assim que a permissão correspondente ao token GRANT é recebida, o processo ingressa em sua zona de execução restrita, efetuando a abertura do arquivo compartilhado resultado.txt em modo de anexação (append) para gravar de forma atômica o seu identificador exclusivo e a marcação cronológica atual obtida do sistema operacional. Após concluir a gravação e fechar o descritor do arquivo, o nó invoca uma pausa temporal intencional através da função de repouso (sleep) por um período predefinido de simulação de processamento. Esse ciclo completo repete-se por um número finito de iterações antes do encerramento definitivo do ciclo de vida do cliente. Para fins de simulação de concorrência e estresse do algoritmo, múltiplos processos independentes são executados de forma simultânea na mesma máquina física, concentrando todas as escritas concorrentes em direção ao mesmo arquivo alvo para ratificar a eficácia real da exclusão mútua distribuída.
+3. Detalhes da Implementação e Estrutura do Código
+A solução foi desenvolvida na linguagem Python, explorando seus recursos nativos de concorrência e rede de forma modular e limpa. A seguir, são descritos os principais blocos de lógica que sustentam o funcionamento coordenado do sistema.
+3.1. Formatação e Parsing do Protocolo de Tamanho Fixo
+Para assegurar que todas as mensagens trafegadas na rede possuam exatamente o comprimento fixado de 10 bytes, foram projetadas funções simétricas de montagem e desmontagem de pacotes. Estas rotinas realizam o cálculo do preenchimento residual em bytes e tratam a decodificação de strings brutas recebidas diretamente do buffer do socket:
+Trecho do Protocolo de Mensagens (Fila e Sockets)
+F = 10  # Tamanho fixo de toda a mensagem em bytes
+
+def montar(tipo, pid):
+    # tipo: "1"=REQUEST  "2"=GRANT  "3"=RELEASE  "0"=CONECTAR
+    base = tipo + "|" + pid + "|"
+    # Preenche com caracteres '0' até atingir o tamanho exato de F bytes
+    return (base + "0" * (F - len(base))).encode()
+
+def desmontar(raw):
+    partes = raw.decode().split("|")
+    return partes[0], partes[1]  # Retorna: tipo, pid
+
+3.2. Lógica Central de Exclusão Mútua no Coordenador
+O núcleo decisório do coordenador executa em uma thread isolada, consumindo eventos de uma fila sincronizada que centraliza as mensagens assíncronas capturadas da rede. O estado da região crítica e a consistência da fila de espera são protegidos por meio de um objeto de trava do tipo threading.Lock(), conforme exposto na rotina abaixo:
+Algoritmo de Escalonamento e Controle no Coordenador
+def algoritmo():
+    rc_livre = True
+    while not parar.is_set():
+        try:
+            tipo, pid, conn = eventos.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        if tipo == "1":  # Trata a mensagem de REQUEST
+            with lock:
+                fila.append((pid, conn))
+            if rc_livre:
+                rc_livre = False
+                with lock:
+                    prox_pid, prox_conn = fila.pop(0)
+                prox_conn.sendall(montar("2", prox_pid))
+                log("SEND", "2", prox_pid)
+
+        elif tipo == "3":  # Trata a mensagem de RELEASE
+            with lock:
+                contagem[pid] += 1
+                tem_prox = len(fila) > 0
+                if tem_prox:
+                    prox_pid, prox_conn = fila.pop(0)
+            if tem_prox:
+                prox_conn.sendall(montar("2", prox_pid))
+                log("SEND", "2", prox_pid)
+            else:
+                rc_livre = True
+
+3.3. Ciclo de Execução e Região Crítica no Cliente
+No lado do cliente, o fluxo de execução é estritamente sequencial para cada iteração do laço. O bloqueio temporário ocorre nativamente durante a chamada à função de leitura do socket, que suspende a execução do processo até que o coordenador envie os bytes correspondentes à liberação de acesso, mitigando qualquer mecanismo de espera ocupada:
+Laço Iterativo da Região Crítica no Cliente
+# Loop principal de execução das r repetições do processo
+for i in range(r):
+    sock.sendall(montar("1", pid))          # Envia REQUEST
+    print(f"pid={pid} REQUEST ({i+1}/{r})")
+
+    receber(sock)                           # Bloqueia a aguardar o GRANT
+    print(f"pid={pid} GRANT recebido")
+
+    # Início da Região Crítica
+    agora = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    with open("resultado.txt", "a") as f:
+        f.write(f"{pid} {agora}\n")
+    time.sleep(k)                           # Simula processamento na RC
+    # Fim da Região Crítica
+
+    sock.sendall(montar("3", pid))          # Envia RELEASE
+    print(f"pid={pid} RELEASE\n")
+
+4. Avaliação e Casos de Teste
+A garantia de qualidade, a robustez e a validação de corretude do ecossistema distribuído foram conduzidas a partir de um modelo de medição automatizado aplicado diretamente sobre os artefatos gerados nas simulações. O procedimento de teste inicia-se através de um script de orquestração automatizado que faz uso do utilitário subprocess para instanciar, de forma sequencial e sem retardos artificiais, o volume total de clientes parametrizado para o cenário. Ao término da simulação de carga, uma rotina de inspection pós-execução realiza a leitura exaustiva do arquivo resultado.txt para certificar se o quantitativo de linhas geradas coincide exatamente com o produto matemático entre o número de processos concorrentes e suas respectivas repetições, representado pela relação n x r. Adicionalmente, o validador inspeciona a integridade cronológica dos registros gravados, assegurando que as marcas de tempo impressas sejam estritamente crescentes e que cada processo individual tenha completado com êxito todas as suas iterações planejadas.
+Paralelamente, o arquivo de logs gerado pelo coordenador central é submetido a um script de verificação formal focado na integridade do protocolo de exclusão mútua. Esta auditoria estrita analisa a ordem de todas as transações para atestar que as diretivas GRANT e RELEASE ocorram de forma perfeitamente intercalada, comprovando empiricamente que nunca existiram dois processos alocados simultaneamente dentro da região crítica. O validador fiscaliza também se a ordem sequencial dos pedidos registrados via mensagens de REQUEST reflete fielmente a ordem de atendimento e a liberação subsequente de recursos pela fila, chancelando o comportamento de justiça (fairness) do algoritmo centralizado sob condições de estresse e alta concorrência de rede.
+5. Conclusão
+O sistema distribuído implementado cumpre com pleno êxito os requisitos operacionais de exclusão mútua por meio de um modelo centralizado. A escolha por um protocolo rígido com tamanho fixado em 10 bytes mostrou-se altamente eficaz, criando estabilidade e a integridade do parsing de rede e eliminando ambiguidades na delimitação das mensagens de controle. As baterias de testes automatizados de verificação lógica evidenciaram que as diretivas de concessão e liberação mantiveram-se perfeitamente síncronas e intercaladas, mesmo quando submetidas a cenários de concorrência acentuada. Consequentemente, o emprego estratégico de primitivas de sincronização locais no servidor assegurou a total integridade das estruturas de dados globais, eliminando condições de corrida e garantindo a segurança e o isolamento completo dos processos clientes durante o acesso simulado à região crítica.
