@@ -62,8 +62,9 @@ def aceitar(server):
 
             raw = conn.recv(F)
             tipo, pid = desmontar(raw)
-            #assim que o processo se conecta, ele envia uma mensagem e o servidor pega o tipo e pid apenas registra ele, no caso a mensagem é do tipo "0" = CONECTAR, e o pid é o identificador do processo que se conectou(COLCOAR NA RELAGORIO TBM, INFORMACAO MUITO IMPORTE)
-            log("RECV", tipo, pid)
+            #assim que o processo se conecta, ele envia uma mensagem do tipo "0" = CONECTAR, com o pid do processo
+            #NÃO chamamos log() aqui de propósito: tipo=0 é só apresentação/handshake, não é um evento do algoritmo de exclusão mútua,
+            #então não deve aparecer nem no terminal nem no coord.log (só REQUEST=1, GRANT=2, RELEASE=3 devem aparecer)
             with lock: #lock para garantir que apenas uma thread acesse as variaveis globais de cada vez, evitando problemas de concorrencia
                 sockets[pid] = conn #define o dicionario de sockets, associando o pid do processo com a conexão socket
                 contagem[pid] = 0 #inicializa a contagem de atendimentos para o processo que acabou de se conectar
@@ -76,8 +77,10 @@ def aceitar(server):
             break
 
 
-def algoritmo(): #responsavel por implementar o algoritmo de exclusão mutua centralizado, ele que decide quem tem o direito de acessar a regiao critica 
-    rc_livre = True #flag para indicar se a rc esta livre
+def algoritmo(): #responsavel por implementar o algoritmo de exclusão mutua centralizado, ele que decide quem tem o direito de acessar a regiao critica
+    # OBS: não existe mais flag de "rc_livre". A própria fila é a fonte da verdade:
+    # a CABEÇA da fila (fila[0]) é sempre quem está com a RC (ou quem acabou de receber o Grant).
+    # Os demais elementos são quem ainda está esperando, na ordem de chegada.
     while not parar.is_set(): #loop que fica rodando continuamente para procesar os pedidos dos clientes, até que o administrador decida encerrar o programa
         try:
             tipo, pid, conn = eventos.get(timeout=0.5) 
@@ -88,25 +91,24 @@ def algoritmo(): #responsavel por implementar o algoritmo de exclusão mutua cen
 
         if tipo == "1":  # REQUEST
             with lock:
-                fila.append((pid, conn)) #assim que o processo pede para entrar na rc ele via para o fim da fila de espera(with lock garante que ngm algere a fila ao mesmo tempo)
-            if rc_livre:
-                rc_livre = False #se o recurso estiver liver o cordenador muda o status para false
-                with lock:
-                    prox_pid, prox_conn = fila.pop(0) #retira a primeira pessoa da fila
-                prox_conn.sendall(montar("2", prox_pid)) #envia a mansagem grant de volta para o processo, agora o processo cliente esta autorizado a entrar na rc
-                log("SEND", "2", prox_pid) #registra no arquivo de log que a parmissão foi enviada
+                fila.append((pid, conn)) #o pedido sempre entra no fim da fila (igual ao Q.add do slide)
+                eh_cabeca = fila[0][0] == pid #se ele caiu na cabeça da fila, é porque a fila estava vazia antes -> RC estava livre
+            if eh_cabeca:
+                conn.sendall(montar("2", pid)) #manda Grant direto, pois ele é o único/primeiro da fila
+                log("SEND", "2", pid)
+            # se não for cabeça, ele só fica esperando na fila até receber o Grant quando chegar sua vez (no RELEASE de quem está na frente)
 
         elif tipo == "3":  # RELEASE
             with lock:
                 contagem[pid] += 1 #atualiza a contagem de atendimentos para o processo que acabou de liberar a rc
-                tem_prox = len(fila) > 0 #verifica se tem alguem na fila esperando para entrar na rc
+                if fila and fila[0][0] == pid: #remove da fila quem estava na RC (deve ser sempre a cabeça)
+                    fila.pop(0)
+                tem_prox = len(fila) > 0 #verifica se tem alguem esperando na fila
                 if tem_prox:
-                    prox_pid, prox_conn = fila.pop(0)#se for verdadiro retira o processo que estava esprando a mais tempo na fila
+                    prox_pid, prox_conn = fila[0] #cabeça da fila é o próximo a entrar -> NÃO remove ainda, só remove quando ELE der release
             if tem_prox:
                 prox_conn.sendall(montar("2", prox_pid)) #envia grant para o proximo processo
                 log("SEND", "2", prox_pid)
-            else:
-                rc_livre = True
 
 
 def main():
